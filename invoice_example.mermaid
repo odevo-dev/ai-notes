@@ -1,0 +1,58 @@
+sequenceDiagram
+    actor Alice
+    participant PDU as PDU Scan
+    participant SFTP as Sftp
+    participant I as Ingestor Service
+    participant BLOB as Blob Store
+    participant Q as Azure Simple Queue
+    participant DS as Document Service
+    participant IES as Invoice Extractor Service
+    participant UI as Extraction UI backend
+    participant SBC as SBC Integration Service
+    participant ERP as SBC ERP (Nordic Platform)
+    loop Every 5 minutes
+    SBC->>+ERP: pull report: all_clients
+    ERP->>-SBC: clients
+    note over SBC: store clients in db
+    SBC->>+ERP: pull report: all_invoices
+    ERP->>-SBC: invoices
+    note over SBC: store invoices in db
+    end
+    note over Alice: selects ai-invoice-abby profile
+    Alice-->>PDU: scans document
+    PDU->>SFTP: upload file (dir=ai-invoice-abby)
+    I->>+SFTP: poll new files
+    SFTP->>-I: new files
+    I->>BLOB: store files
+    alt Queue
+    I->>Q: create_document_message (type=invoice, domain=sbc, source_system=pdu_scan_abby)
+    DS->>+Q: poll queue
+    Q->>-DS: create_document_message
+    DS->>DS: create document (state=INGESTED)
+    else HTTP
+    I->>DS: create document (type=invoice, domain=sbc, source_system=pdu_scan_abby, state=INGESTED)
+    end
+    DS->>IES: webhook: document_updated_event
+    IES->>+DS: find documents (type=invoice, state=INGESTED)
+    DS->>-IES: document
+    IES->>+BLOB: download files
+    BLOB->>-IES: files
+    IES->>IES: extract fields
+    note over IES: Client ID is missing
+    IES->>DS: update document with extracted fields and state=HUMAN_NEEDED
+    UI->>+DS: find documents (state=HUMAN_NEEDED)
+    DS->>-UI: document
+    note over UI: Employee wants to edit the document
+    UI->>+BLOB: download files
+    BLOB->>-UI: files
+    note over UI: client_id editor component needs list of clients
+    UI->>+SBC: find clients
+    SBC->>-UI: clients
+    note over UI: some editor component needs previous invoices for a specific client
+    UI->>+SBC: find invoices
+    SBC->>-UI: invoices
+    UI->>UI: human makes manual edits
+    UI->>DS: update document (state=COMPLETED)
+    DS->>ERP: webhook: document_updated_event
+    ERP->>+DS: find documents (state=COMPLETED, completed_ts>last_complete_document_ts, output_template=erp)
+    DS->>-ERP: new document templated for ERP
